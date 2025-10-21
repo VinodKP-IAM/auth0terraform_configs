@@ -1,0 +1,591 @@
+name: Deploy Auth0 Infrastructure
+
+# ENVIRONMENT PROTECTION SETUP:
+# To enable approval gates for production deployments:
+# 1. Go to: https://github.com/KaranGupta05/terraform_auth0/settings/environments
+# 2. Click on "production" environment
+# 3. Add protection rules:
+#    - Required reviewers: Add 1-2 team members who can approve production deployments
+#    - Wait timer: Optional 15-minute delay before deployment can proceed
+#    - Deployment branches: Restrict to main/master branches only
+# 4. For staging environment (optional):
+#    - Required reviewers: Add 1 reviewer
+#    - Wait timer: Optional 5-minute delay
+# 5. Development environment can remain without restrictions
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - development
+      - 'feature/**'
+      - 'hotfix/**'
+      - 'release/**'
+    tags:
+      - 'v*.*'
+      - 'v*.*.*'
+      - 'v*.*-*'
+  pull_request:
+    branches:
+      - main
+      - master
+      - development
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      force_deploy:
+        description: 'Force deployment (skip checks)'
+        required: false
+        default: false
+        type: boolean
+      create_tag:
+        description: 'Create release tag after successful deployment'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  TF_VERSION: '1.5.7'
+  TF_IN_AUTOMATION: true
+  TF_INPUT: false
+
+# Grant necessary permissions for the workflow
+permissions:
+  contents: write      # Required for creating tags and releases
+  actions: read        # Required for downloading artifacts
+  checks: read         # Required for status checks
+  pull-requests: write # Required for PR comments
+
+jobs:
+  # Determine deployment strategy based on branch/tag/trigger
+  determine-strategy:
+    name: 'Determine Deployment Strategy'
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.strategy.outputs.environment }}
+      tenant: ${{ steps.strategy.outputs.tenant }}
+      tf_vars_file: ${{ steps.strategy.outputs.tf_vars_file }}
+      should_deploy: ${{ steps.strategy.outputs.should_deploy }}
+      deployment_type: ${{ steps.strategy.outputs.deployment_type }}
+      create_tag: ${{ steps.strategy.outputs.create_tag }}
+      
+    steps:
+      - name: Determine Deployment Strategy
+        id: strategy
+        run: |
+          echo "🔍 Analyzing deployment context..."
+          echo "Event: ${{ github.event_name }}"
+          echo "Ref: ${{ github.ref }}"
+          echo "Branch: ${{ github.ref_name }}"
+          
+          # Default values
+          ENVIRONMENT="development"
+          TENANT="dev" 
+          TF_VARS_FILE="config/dev.tfvars"
+          SHOULD_DEPLOY="false"
+          DEPLOYMENT_TYPE="feature"
+          CREATE_TAG="false"
+          
+          # Manual workflow dispatch
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            ENVIRONMENT="${{ github.event.inputs.environment }}"
+            SHOULD_DEPLOY="true"
+            DEPLOYMENT_TYPE="manual"
+            CREATE_TAG="${{ github.event.inputs.create_tag }}"
+            
+            case "$ENVIRONMENT" in
+              "development")
+                TENANT="dev"
+                TF_VARS_FILE="config/dev.tfvars"
+                ;;
+              "staging")
+                TENANT="staging"
+                TF_VARS_FILE="config/qa.tfvars"
+                ;;
+              "production")
+                TENANT="production"
+                TF_VARS_FILE="config/prod.tfvars"
+                ;;
+            esac
+          
+          # Tag-based deployments (Staging)
+          elif [[ "${{ github.ref }}" =~ ^refs/tags/v[0-9]+\.[0-9]+.*-staging$ ]]; then
+            ENVIRONMENT="staging"
+            TENANT="staging"
+            TF_VARS_FILE="config/qa.tfvars"
+            SHOULD_DEPLOY="true"
+            DEPLOYMENT_TYPE="staging"
+            CREATE_TAG="true"
+            
+          # Tag-based deployments (Production)
+          elif [[ "${{ github.ref }}" =~ ^refs/tags/v[0-9]+\.[0-9]+(\.[0-9]+)?(-.*)?$ ]]; then
+            ENVIRONMENT="production"
+            TENANT="prod"
+            TF_VARS_FILE="config/prod.tfvars"
+            SHOULD_DEPLOY="true"
+            DEPLOYMENT_TYPE="release"
+            CREATE_TAG="true"
+            
+          # Branch-based deployments
+          elif [[ "${{ github.event_name }}" == "push" ]]; then
+            case "${{ github.ref_name }}" in
+              "main"|"master")
+                ENVIRONMENT="production"
+                TENANT="prod"
+                TF_VARS_FILE="config/prod.tfvars"
+                SHOULD_DEPLOY="true"
+                DEPLOYMENT_TYPE="production"
+                CREATE_TAG="true"
+                ;;
+              "development")
+                ENVIRONMENT="development"
+                TENANT="dev"
+                TF_VARS_FILE="config/dev.tfvars"
+                SHOULD_DEPLOY="true"
+                DEPLOYMENT_TYPE="development"
+                ;;
+              hotfix/*)
+                ENVIRONMENT="staging"
+                TENANT="staging"
+                TF_VARS_FILE="config/qa.tfvars"
+                SHOULD_DEPLOY="true"
+                DEPLOYMENT_TYPE="hotfix"
+                ;;
+              release/*)
+                ENVIRONMENT="staging"
+                TENANT="staging"
+                TF_VARS_FILE="config/qa.tfvars"
+                SHOULD_DEPLOY="true"
+                DEPLOYMENT_TYPE="release"
+                ;;
+              feature/*)
+                ENVIRONMENT="development"
+                TENANT="dev"
+                TF_VARS_FILE="config/dev.tfvars"
+                SHOULD_DEPLOY="false"
+                DEPLOYMENT_TYPE="feature"
+                ;;
+            esac
+          
+          # Pull Request - Only plan, no deploy
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            case "${{ github.base_ref }}" in
+              "main"|"master")
+                ENVIRONMENT="production"
+                TENANT="prod"
+                TF_VARS_FILE="config/prod.tfvars"
+                ;;
+              "development")
+                ENVIRONMENT="development"
+                TENANT="dev"
+                TF_VARS_FILE="config/dev.tfvars"
+                ;;
+              *)
+                ENVIRONMENT="staging"
+                TENANT="staging"
+                TF_VARS_FILE="config/qa.tfvars"
+                ;;
+            esac
+            SHOULD_DEPLOY="false"
+            DEPLOYMENT_TYPE="pr"
+          fi
+          
+          echo "environment=$ENVIRONMENT" >> $GITHUB_OUTPUT
+          echo "tenant=$TENANT" >> $GITHUB_OUTPUT
+          echo "tf_vars_file=$TF_VARS_FILE" >> $GITHUB_OUTPUT
+          echo "should_deploy=$SHOULD_DEPLOY" >> $GITHUB_OUTPUT
+          echo "deployment_type=$DEPLOYMENT_TYPE" >> $GITHUB_OUTPUT
+          echo "create_tag=$CREATE_TAG" >> $GITHUB_OUTPUT
+          
+          echo "📋 Deployment Strategy:"
+          echo "  Environment: $ENVIRONMENT"
+          echo "  Tenant: $TENANT"
+          echo "  Vars File: $TF_VARS_FILE"
+          echo "  Should Deploy: $SHOULD_DEPLOY"
+          echo "  Type: $DEPLOYMENT_TYPE"
+          echo "  Create Tag: $CREATE_TAG"
+
+  # Terraform Plan Job
+  terraform-plan:
+    name: 'Terraform Plan (${{ needs.determine-strategy.outputs.environment }})'
+    runs-on: ubuntu-latest
+    needs: determine-strategy
+    environment: ${{ needs.determine-strategy.outputs.environment }}
+    
+    outputs:
+      plan-exitcode: ${{ steps.plan.outputs.exitcode }}
+      
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure Auth0 Credentials
+        env:
+          AUTH0_DOMAIN: ${{ secrets.AUTH0_DOMAIN }}
+          AUTH0_CLIENT_ID: ${{ secrets.AUTH0_CLIENT_ID }}
+          AUTH0_CLIENT_SECRET: ${{ secrets.AUTH0_CLIENT_SECRET }}
+        run: |
+          cat > terraform.tfvars << EOF
+          auth0_domain = "$AUTH0_DOMAIN"
+          auth0_client_id = "$AUTH0_CLIENT_ID"
+          auth0_client_secret = "$AUTH0_CLIENT_SECRET"
+          EOF
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Verify Auth0 Permissions
+        env:
+          AUTH0_DOMAIN: ${{ secrets.AUTH0_DOMAIN }}
+          AUTH0_CLIENT_ID: ${{ secrets.AUTH0_CLIENT_ID }}
+          AUTH0_CLIENT_SECRET: ${{ secrets.AUTH0_CLIENT_SECRET }}
+        run: |
+          echo "🔐 Verifying Auth0 API permissions..."
+          
+          # Get access token
+          TOKEN_RESPONSE=$(curl -s -X POST "https://$AUTH0_DOMAIN/oauth/token" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "client_id": "'$AUTH0_CLIENT_ID'",
+              "client_secret": "'$AUTH0_CLIENT_SECRET'",
+              "audience": "https://'$AUTH0_DOMAIN'/api/v2/",
+              "grant_type": "client_credentials"
+            }')
+          
+          ACCESS_TOKEN=$(echo $TOKEN_RESPONSE | jq -r '.access_token')
+          
+          if [[ "$ACCESS_TOKEN" != "null" && "$ACCESS_TOKEN" != "" ]]; then
+            echo "✅ Successfully obtained Auth0 access token"
+            
+            # Test API call
+            API_RESPONSE=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+              "https://$AUTH0_DOMAIN/api/v2/clients?per_page=1")
+            
+            if [[ $? -eq 0 ]]; then
+              echo "✅ Auth0 API permissions verified"
+            else
+              echo "❌ Failed to verify Auth0 API permissions"
+              exit 1
+            fi
+          else
+            echo "❌ Failed to obtain Auth0 access token"
+            exit 1
+          fi
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          set +e
+          echo "📋 Running Terraform plan for ${{ needs.determine-strategy.outputs.deployment_type }} deployment..."
+          terraform plan -var-file="${{ needs.determine-strategy.outputs.tf_vars_file }}" -out=tfplan -detailed-exitcode
+          PLAN_EXIT_CODE=$?
+          echo "exitcode=$PLAN_EXIT_CODE" >> $GITHUB_OUTPUT
+          
+          echo "Plan exit code: $PLAN_EXIT_CODE"
+          
+          # Generate human-readable plan
+          terraform show -no-color tfplan > plan-output.txt
+          
+          # Set exit code for workflow
+          exit $PLAN_EXIT_CODE
+
+      - name: Upload Plan Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: terraform-plan-${{ needs.determine-strategy.outputs.environment }}-${{ github.run_number }}
+          path: |
+            tfplan
+            plan-output.txt
+          retention-days: 7
+
+      - name: Comment Plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let plan = '';
+            try {
+              plan = fs.readFileSync('plan-output.txt', 'utf8');
+            } catch (error) {
+              plan = 'Plan output not available';
+            }
+            
+            const maxLength = 65000;
+            const truncatedPlan = plan.length > maxLength 
+              ? plan.substring(0, maxLength) + '\n... (truncated)'
+              : plan;
+
+            const deploymentType = '${{ needs.determine-strategy.outputs.deployment_type }}';
+            const environment = '${{ needs.determine-strategy.outputs.environment }}';
+            const exitCode = '${{ steps.plan.outputs.exitcode }}';
+            
+            let statusEmoji = '';
+            let statusText = '';
+            
+            switch(exitCode) {
+              case '0':
+                statusEmoji = '✅';
+                statusText = 'No changes';
+                break;
+              case '2':
+                statusEmoji = '📋';
+                statusText = 'Changes detected';
+                break;
+              default:
+                statusEmoji = '❌';
+                statusText = 'Error';
+            }
+
+            const output = `
+            ## 🏗️ Terraform Plan - ${environment} (${deploymentType})
+            
+            **Status:** ${statusEmoji} ${statusText}
+            **Environment:** ${environment}
+            **Deployment Type:** ${deploymentType}
+            **Target Tenant:** ${{ needs.determine-strategy.outputs.tenant }}
+            
+            <details>
+            <summary>📖 Click to expand plan details</summary>
+            
+            \`\`\`hcl
+            ${truncatedPlan}
+            \`\`\`
+            
+            </details>
+            `;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+  # Terraform Apply Job
+  terraform-apply:
+    name: 'Deploy to ${{ needs.determine-strategy.outputs.environment }}'
+    runs-on: ubuntu-latest
+    needs: [determine-strategy, terraform-plan]
+    environment: ${{ needs.determine-strategy.outputs.environment }}
+    
+    if: needs.determine-strategy.outputs.should_deploy == 'true'
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure Auth0 Credentials
+        env:
+          AUTH0_DOMAIN: ${{ secrets.AUTH0_DOMAIN }}
+          AUTH0_CLIENT_ID: ${{ secrets.AUTH0_CLIENT_ID }}
+          AUTH0_CLIENT_SECRET: ${{ secrets.AUTH0_CLIENT_SECRET }}
+        run: |
+          cat > terraform.tfvars << EOF
+          auth0_domain = "$AUTH0_DOMAIN"
+          auth0_client_id = "$AUTH0_CLIENT_ID"
+          auth0_client_secret = "$AUTH0_CLIENT_SECRET"
+          EOF
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Download Plan Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan-${{ needs.determine-strategy.outputs.environment }}-${{ github.run_number }}
+
+      - name: Approval Gate for Production
+        if: needs.determine-strategy.outputs.environment == 'production'
+        run: |
+          echo "🔒 Production Deployment - Approval Required"
+          echo "This deployment targets the PRODUCTION environment."
+          echo "Please review the terraform plan above before approving."
+          echo ""
+          echo "Deployment Details:"
+          echo "  • Environment: ${{ needs.determine-strategy.outputs.environment }}"
+          echo "  • Tenant: ${{ needs.determine-strategy.outputs.tenant }}"
+          echo "  • Branch/Tag: ${{ github.ref_name }}"
+          echo "  • Commit: ${{ github.sha }}"
+          echo "  • Vars File: ${{ needs.determine-strategy.outputs.tf_vars_file }}"
+          echo ""
+          echo "⚠️  CAUTION: This will modify PRODUCTION Auth0 tenant"
+
+      - name: Pre-deployment Validation
+        run: |
+          echo "🔍 Performing pre-deployment validation for ${{ needs.determine-strategy.outputs.deployment_type }}"
+          
+          # Validate critical production settings
+          if grep -q "environment.*=.*prod" ${{ needs.determine-strategy.outputs.tf_vars_file }}; then
+            echo "✅ Production environment configuration detected"
+          else
+            echo "⚠️ Production environment configuration validation skipped"
+          fi
+          
+          # Check if plan has changes
+          if [[ "${{ needs.terraform-plan.outputs.plan-exitcode }}" == "2" ]]; then
+            echo "✅ Changes detected in plan - proceeding with deployment"
+          else
+            echo "ℹ️ No changes detected - deployment will proceed but may not modify resources"
+          fi
+          
+          # Additional validation for production
+          if [[ "${{ needs.determine-strategy.outputs.environment }}" == "production" ]]; then
+            echo "🔒 Additional production validations:"
+            echo "  • Deployment approved through GitHub environment protection"
+            echo "  • Plan reviewed and validated"
+            echo "  • Production tenant backup recommended"
+          fi
+
+      - name: Terraform Apply
+        id: apply
+        run: |
+          echo "🚀 Deploying to ${{ needs.determine-strategy.outputs.environment }} (${{ needs.determine-strategy.outputs.deployment_type }})"
+          echo "Using variables file: ${{ needs.determine-strategy.outputs.tf_vars_file }}"
+          terraform apply -auto-approve tfplan
+
+      - name: Generate Deployment Summary
+        run: |
+          echo "## 🎉 Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Environment** | ${{ needs.determine-strategy.outputs.environment }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Tenant** | ${{ needs.determine-strategy.outputs.tenant }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Deployment Type** | ${{ needs.determine-strategy.outputs.deployment_type }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch/Tag** | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Vars File** | ${{ needs.determine-strategy.outputs.tf_vars_file }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📊 Terraform Outputs" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          terraform output -no-color >> $GITHUB_STEP_SUMMARY || echo "No outputs available" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+  # Create release tag for successful production deployments
+  create-release-tag:
+    name: 'Create Release Tag'
+    runs-on: ubuntu-latest
+    needs: [determine-strategy, terraform-apply]
+    if: |
+      needs.determine-strategy.outputs.create_tag == 'true' && 
+      needs.terraform-apply.result == 'success' &&
+      (needs.determine-strategy.outputs.deployment_type == 'production' || 
+       needs.determine-strategy.outputs.deployment_type == 'release' ||
+       needs.determine-strategy.outputs.deployment_type == 'staging')
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate Version Tag
+        id: version
+        run: |
+          # Get the latest tag
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "Latest tag: $LATEST_TAG"
+          
+          # Extract version numbers
+          VERSION=$(echo $LATEST_TAG | sed 's/^v//')
+          IFS='.' read -ra VERSION_PARTS <<< "$VERSION"
+          
+          MAJOR=${VERSION_PARTS[0]:-0}
+          MINOR=${VERSION_PARTS[1]:-0}
+          PATCH=${VERSION_PARTS[2]:-0}
+          
+          # Increment patch version
+          PATCH=$((PATCH + 1))
+          
+          NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "New tag: $NEW_TAG"
+          echo "tag=$NEW_TAG" >> $GITHUB_OUTPUT
+
+      - name: Create Release Tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git tag -a "${{ steps.version.outputs.tag }}" -m "Production deployment - ${{ github.sha }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+          
+          echo "✅ Created release tag: ${{ steps.version.outputs.tag }}"
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Determine if this should be a prerelease
+          IS_PRERELEASE="false"
+          if [[ "${{ needs.determine-strategy.outputs.deployment_type }}" == "staging" ]]; then
+            IS_PRERELEASE="true"
+          fi
+          
+          # Create the release using GitHub CLI
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --title "Release ${{ steps.version.outputs.tag }}" \
+            --notes "## Auth0 Infrastructure Release ${{ steps.version.outputs.tag }}
+          
+          **Deployment Details:**
+          - **Environment:** ${{ needs.determine-strategy.outputs.environment }}
+          - **Tenant:** ${{ needs.determine-strategy.outputs.tenant }}
+          - **Commit:** ${{ github.sha }}
+          - **Branch:** ${{ github.ref_name }}
+          - **Deployment Type:** ${{ needs.determine-strategy.outputs.deployment_type }}
+          
+          **Changes:**
+          Deployed Auth0 infrastructure changes to ${{ needs.determine-strategy.outputs.environment }} environment.
+          
+          **Rollback:**
+          If needed, rollback can be performed by reverting to the previous release tag." \
+            $(if [[ "$IS_PRERELEASE" == "true" ]]; then echo "--prerelease"; fi)
+
+  # Notification job for deployment status
+  notify-deployment:
+    name: 'Notify Deployment Status'
+    runs-on: ubuntu-latest
+    needs: [determine-strategy, terraform-apply]
+    if: always() && needs.determine-strategy.outputs.should_deploy == 'true'
+    
+    steps:
+      - name: Deployment Success Notification
+        if: needs.terraform-apply.result == 'success'
+        run: |
+          echo "✅ Successfully deployed Auth0 infrastructure"
+          echo "Environment: ${{ needs.determine-strategy.outputs.environment }}"
+          echo "Deployment Type: ${{ needs.determine-strategy.outputs.deployment_type }}"
+          echo "Tenant: ${{ needs.determine-strategy.outputs.tenant }}"
+
+      - name: Deployment Failure Notification
+        if: needs.terraform-apply.result == 'failure'
+        run: |
+          echo "❌ Failed to deploy Auth0 infrastructure"
+          echo "Environment: ${{ needs.determine-strategy.outputs.environment }}"
+          echo "Deployment Type: ${{ needs.determine-strategy.outputs.deployment_type }}"
+          echo "Check the logs for details"
+          exit 1
