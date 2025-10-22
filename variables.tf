@@ -154,6 +154,15 @@ variable "email_provider_settings" {
         view_content_link      = optional(bool)
       }))
     }))
+
+    # Custom email provider action configuration
+    # Required when name = "custom"
+    custom_action = optional(object({
+      name    = string
+      runtime = optional(string, "node18")
+      deploy  = optional(bool, true)
+      code    = string
+    }))
   })
   default = {}
 }

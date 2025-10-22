@@ -33,6 +33,88 @@ resource "auth0_action" "custom_email_provider_action" {
   deploy  = var.settings.custom_action.deploy
   code    = var.settings.custom_action.code
 
+  # Add required dependencies for email services
+  dependencies {
+    name    = "axios"
+    version = "1.6.0"
+  }
+
+  dependencies {
+    name    = "nodemailer"
+    version = "6.9.7"
+  }
+
+  # Configure secrets for email service credentials
+  secrets {
+    name  = "EMAIL_SERVICE"
+    value = "SMTP"  # Default to SMTP
+  }
+
+  secrets {
+    name  = "ENVIRONMENT"
+    value = "development"
+  }
+
+  secrets {
+    name  = "SMTP_HOST"
+    value = "smtp.gmail.com"
+  }
+
+  secrets {
+    name  = "SMTP_PORT"
+    value = "587"
+  }
+
+  # Placeholder secrets - configure these in Auth0 Dashboard
+  secrets {
+    name  = "SMTP_USER"
+    value = "your-email@gmail.com"  # Replace with actual email
+  }
+
+  secrets {
+    name  = "SMTP_PASS"
+    value = "your-app-password"     # Replace with actual app password
+  }
+
+  # Optional: SendGrid configuration
+  secrets {
+    name  = "SENDGRID_API_KEY"
+    value = "SG.your-api-key-here"  # Replace with actual SendGrid API key
+  }
+
+  # Optional: Mailgun configuration
+  secrets {
+    name  = "MAILGUN_API_KEY"
+    value = "your-mailgun-api-key"  # Replace with actual Mailgun API key
+  }
+
+  secrets {
+    name  = "MAILGUN_DOMAIN"
+    value = "your-domain.mailgun.org"  # Replace with actual Mailgun domain
+  }
+
+  # Optional: AWS SES configuration
+  secrets {
+    name  = "AWS_ACCESS_KEY_ID"
+    value = "your-aws-access-key"     # Replace with actual AWS access key
+  }
+
+  secrets {
+    name  = "AWS_SECRET_ACCESS_KEY"
+    value = "your-aws-secret-key"     # Replace with actual AWS secret key
+  }
+
+  secrets {
+    name  = "AWS_REGION"
+    value = "us-east-1"
+  }
+
+  # Optional: Logging webhook
+  secrets {
+    name  = "LOG_WEBHOOK_URL"
+    value = "https://your-logging-service.com/webhook"  # Replace with actual webhook URL
+  }
+
   supported_triggers {
     id      = "custom-email-provider"
     version = "v1"
@@ -124,9 +206,9 @@ resource "auth0_email_provider" "this" {
       error_message = "Invalid 'name'. Must be one of: azure_cs, custom, mailgun, mandrill, ms365, sendgrid, ses, smtp, sparkpost."
     }
     precondition {
-      # For custom providers, ensure the action exists and is properly configured
-      condition     = var.settings.name != "custom" || (var.settings.custom_action != null && local.action_dependency != null)
-      error_message = "Custom email provider requires the action to be created first. Check that custom_action is properly configured."
+      # For custom providers, ensure the custom_action configuration is provided
+      condition     = var.settings.name != "custom" || (var.settings.custom_action != null && local.create_action)
+      error_message = "Custom email provider requires the custom_action to be properly configured with name, runtime, deploy, and code."
     }
   }
 }

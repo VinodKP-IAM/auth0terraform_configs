@@ -44,12 +44,13 @@ module "my_branding" {
   settings = var.branding_settings
 }
 
-module "my_email_provider" {
-  source = "./modules/auth0-email-provider"
-
-  # Pass the entire settings object to the module
-  settings = var.email_provider_settings
-}
+# Email Provider Module - Temporarily disabled due to Auth0 limitation
+# module "my_email_provider" {
+#   source = "./modules/auth0-email-provider"
+#
+#   # Pass the entire settings object to the module
+#   settings = var.email_provider_settings
+# }
 
 module "my_email_templates" {
   source = "./modules/auth0-email-templates"
@@ -98,4 +99,21 @@ module "my_guardian" {
 
   # Pass the entire settings object to the module
   settings = var.guardian_settings
+}
+
+# Output tenant information for visibility
+output "tenant_info" {
+  description = "Information about the Auth0 tenant being managed"
+  value = {
+    domain      = var.auth0_domain
+    client_id   = var.auth0_client_id
+    friendly_name = try(var.tenant_settings.friendly_name, "Not specified")
+  }
+  sensitive = true
+}
+
+output "tenant_domain_only" {
+  description = "Auth0 tenant domain (non-sensitive)"
+  value = var.auth0_domain
+  sensitive = true
 }

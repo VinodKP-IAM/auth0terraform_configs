@@ -6,7 +6,7 @@
 # To add a new setting (e.g., picture_url), you just add a new line here.
 tenant_settings = {
   manage              = true
-  friendly_name       = "My DEV Tenant (Managed by TF)"
+  friendly_name       = "My New TenantssS"
   session_lifetime         = 72
   maximum_session_lifetime = 168
   support_email       = "dev-support@mycompany.com"
@@ -21,7 +21,7 @@ prompt_settings = {
 }
 
 attack_protection_settings = {
-  manage = true
+  manage = false  # Disabled - requires paid subscription
 
   brute_force_protection = {
     enabled      = true
@@ -41,15 +41,15 @@ attack_protection_settings = {
   }
 
   breached_password_detection = {
-    enabled = true
+    enabled = false  # Disabled - requires paid subscription
     method  = "standard"
     shields = ["admin_notification", "block"]
   }
 }
 
-# Auth0 branding
+# Auth0 branding - Disabled for free tier
 branding_settings = {
-  manage   = true
+  manage   = false  # Disabled - requires paid subscription
   logo_url = "https://www.shutterstock.com/shutterstock/photos/2174926871/display_1500/stock-vector-circle-line-simple-design-logo-blue-format-jpg-png-eps-2174926871.jpg"
   colors = {
     primary         = "#1A53E0"
@@ -58,71 +58,22 @@ branding_settings = {
 }
 
 email_provider_settings = {
-  manage               = false
+  manage               = true
   name                 = "custom"
   default_from_address = "noreply@my-dev-domain.com"
   enabled              = true
   credentials          = {}
   
-  custom_action = {
-    name = "custom-email-provider-dev"
-    runtime = "node18"
-    deploy = true
-    code = <<-EOT
-    /**
-     * Handler to be executed while sending an email notification.
-     *
-     * @param {Event} event - Details about the user and the context in which they are logging in.
-     * @param {CustomEmailProviderAPI} api - Methods and utilities to help change the behavior of sending a email notification.
-     */
-    exports.onExecuteCustomEmailProvider = async (event, api) => {
-      // Development environment custom email logic
-      console.log('DEV: Sending email notification');
-      console.log('User:', event.user.email);
-      console.log('Email type:', event.email_data.type);
-      
-      // Example: Log email data for debugging in dev
-      console.log('Email data:', JSON.stringify(event.email_data, null, 2));
-      
-      // TODO: Implement your custom email service integration here
-      // For development, you might want to:
-      // 1. Send emails to a test service like Mailtrap
-      // 2. Log email content to console
-      // 3. Use a development SMTP server
-      
-      // Example implementation (replace with your service):
-      /*
-      const nodemailer = require('nodemailer');
-      
-      const transporter = nodemailer.createTransporter({
-        host: 'smtp.mailtrap.io',
-        port: 587,
-        auth: {
-          user: process.env.MAILTRAP_USER,
-          pass: process.env.MAILTRAP_PASS
-        }
-      });
-      
-      await transporter.sendMail({
-        from: event.email_data.from,
-        to: event.email_data.to,
-        subject: event.email_data.subject,
-        html: event.email_data.html_body,
-        text: event.email_data.text_body
-      });
-      */
-      
-      return;
-    };
-    EOT
-  }
+  # Temporarily disable custom action to work around Auth0 limitation
+  custom_action = null
 }
+# Custom action code will be added separately after resolving the limitation
 
 # This map defines all the email templates we want to manage.
 # The keys "welcome" and "reset" are just logical names.
 email_templates_settings = {
   
-  manage = true
+  manage = false
   
   templates = {
     welcome = {
@@ -171,7 +122,7 @@ resource_servers_settings = {
 }
 
 log_streams_settings = {
-  manage = true
+  manage = false
   
   streams = {
     "dev_webhook" = {
@@ -264,7 +215,7 @@ clients_settings = {
 }
 
 guardian_settings = {
-  manage = false
+  manage = false  # Disabled - deprecated feature with insufficient privileges
   policy = "never" # Enforce MFA for all logins
 
   # Enable basic factors
@@ -378,77 +329,8 @@ actions_settings = {
         version = "v2"
       }
     }
-    
-    "send_phone_message_action" = {
-      name = "Custom SMS Provider - Dev"
-      runtime = "node18"
-      deploy = true
-      code = <<-EOT
-      /**
-       * Handler that will be called during the execution of a SendPhoneMessage flow.
-       *
-       * @param {Event} event - Details about the request and the phone message.
-       * @param {SendPhoneMessageAPI} api - Interface whose methods can change the behavior of sending a phone message.
-       */
-      exports.onExecuteSendPhoneMessage = async (event, api) => {
-        console.log('Custom SMS action triggered');
-        console.log('Phone number:', event.message_options.recipient);
-        console.log('Message type:', event.message_options.message_type);
-        
-        // Development: Log the message instead of sending
-        console.log('SMS Message Content:', event.message_options.text);
-        
-        // In development, we might want to use a test SMS service
-        // Uncomment and modify for your SMS provider:
-        /*
-        const axios = require('axios');
-        
-        try {
-          await axios.post('https://api.twilio.com/2010-04-01/Accounts/YOUR_ACCOUNT/Messages.json', {
-            To: event.message_options.recipient,
-            From: process.env.TWILIO_PHONE_NUMBER,
-            Body: event.message_options.text
-          }, {
-            auth: {
-              username: process.env.TWILIO_ACCOUNT_SID,
-              password: process.env.TWILIO_AUTH_TOKEN
-            }
-          });
-        } catch (error) {
-          console.error('SMS sending failed:', error);
-        }
-        */
-        
-        console.log('SMS logged successfully (dev mode)');
-      };
-      EOT
-      
-      supported_triggers = {
-        id = "send-phone-message"
-        version = "v1"
-      }
-      
-      dependencies = [
-        {
-          name = "axios"
-          version = "0.21.1"
-        }
-      ]
-      
-      secrets = [
-        {
-          name = "TWILIO_ACCOUNT_SID"
-          value = "your-twilio-account-sid"
-        },
-        {
-          name = "TWILIO_AUTH_TOKEN"
-          value = "your-twilio-auth-token"
-        },
-        {
-          name = "TWILIO_PHONE_NUMBER"
-          value = "+1234567890"
-        }
-      ]
-    }
+
+    # SMS action disabled due to runtime version compatibility issues
+    # Uncomment and configure if needed when subscription supports it
   }
 }
