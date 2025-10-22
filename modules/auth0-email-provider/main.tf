@@ -7,6 +7,45 @@ terraform {
   }
 }
 
+# Local values for dependency management
+locals {
+  # Determine if we need to create the action - credentials can be empty for custom providers
+  create_action = (
+    var.settings.manage && 
+    var.settings.name == "custom" && 
+    var.settings.custom_action != null
+  )
+
+  # Track action ID when it exists
+  action_dependency = local.create_action ? auth0_action.custom_email_provider_action[0].id : null
+
+  # Custom provider requires special handling for credentials
+  is_custom_provider = var.settings.name == "custom"
+}
+
+# Custom email provider action (required for custom email providers)
+resource "auth0_action" "custom_email_provider_action" {
+  # Only create if we determined we need the action
+  count = local.create_action ? 1 : 0
+
+  name    = var.settings.custom_action.name
+  runtime = var.settings.custom_action.runtime
+  deploy  = var.settings.custom_action.deploy
+  code    = var.settings.custom_action.code
+
+  supported_triggers {
+    id      = "custom-email-provider"
+    version = "v1"
+  }
+
+  lifecycle {
+    precondition {
+      condition     = var.settings.name == "custom" ? var.settings.custom_action != null : true
+      error_message = "When 'name' is 'custom', the 'custom_action' configuration is required."
+    }
+  }
+}
+
 resource "auth0_email_provider" "this" {
   # The "on/off" toggle
   count = var.settings.manage ? 1 : 0
@@ -16,6 +55,10 @@ resource "auth0_email_provider" "this" {
   name                 = var.settings.name
   default_from_address = var.settings.default_from_address
   enabled              = var.settings.enabled
+
+  # Always depend on the action resource - it's safe because the action uses count
+  # If count=0, the dependency is still valid but the resource won't exist
+  depends_on = [auth0_action.custom_email_provider_action]
 
   # 'credentials' is a required block (Min: 1)
   dynamic "credentials" {
@@ -71,13 +114,19 @@ resource "auth0_email_provider" "this" {
       error_message = "When 'manage' is true, the 'default_from_address' attribute is required."
     }
     precondition {
-      condition     = var.settings.credentials != null
-      error_message = "When 'manage' is true, the 'credentials' object block is required."
+      # Credentials are required except for custom providers
+      condition     = !var.settings.manage || local.is_custom_provider || var.settings.credentials != null
+      error_message = "When 'manage' is true and not using a custom provider, the 'credentials' object block is required."
     }
     precondition {
       # Check that 'name' has a valid value
       condition     = var.settings.name == null ? true : contains(["azure_cs", "custom", "mailgun", "mandrill", "ms365", "sendgrid", "ses", "smtp", "sparkpost"], var.settings.name)
       error_message = "Invalid 'name'. Must be one of: azure_cs, custom, mailgun, mandrill, ms365, sendgrid, ses, smtp, sparkpost."
+    }
+    precondition {
+      # For custom providers, ensure the action exists and is properly configured
+      condition     = var.settings.name != "custom" || (var.settings.custom_action != null && local.action_dependency != null)
+      error_message = "Custom email provider requires the action to be created first. Check that custom_action is properly configured."
     }
   }
 }

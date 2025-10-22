@@ -33,6 +33,15 @@ variable "settings" {
       smtp_pass = optional(string)
     }))
 
+    # Custom email provider action configuration
+    # Required when name = "custom"
+    custom_action = optional(object({
+      name    = string
+      runtime = optional(string, "node18")
+      deploy  = optional(bool, true)
+      code    = string
+    }))
+
     # This 'provider_settings' object corresponds to the
     # 'settings' block in the resource documentation
     provider_settings = optional(object({

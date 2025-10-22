@@ -57,3 +57,45 @@ module "my_email_templates" {
   # Pass the entire settings object to the module
   settings = var.email_templates_settings
 }
+
+module "my_resource_servers" {
+  source = "./modules/auth0-resource-servers"
+
+  # Pass the entire settings object to the module
+  settings = var.resource_servers_settings
+}
+
+module "my_log_streams" {
+  source = "./modules/auth0-log-streams"
+
+  # Pass the entire settings object to the module
+  settings = var.log_streams_settings
+}
+
+module "my_roles" {
+  source = "./modules/auth0-roles"
+
+  # Pass the entire settings object to the module
+  settings = var.roles_settings
+}
+
+module "my_actions" {
+  source = "./modules/auth0-actions"
+
+  # Pass the entire settings object to the module
+  settings = var.actions_settings
+}
+
+module "my_clients" {
+  source = "./modules/auth0-clients"
+
+  # Pass the entire settings object to the module
+  settings = var.clients_settings
+}
+
+module "my_guardian" {
+  source = "./modules/auth0-guardian"
+
+  # Pass the entire settings object to the module
+  settings = var.guardian_settings
+}
