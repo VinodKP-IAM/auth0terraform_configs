@@ -98,7 +98,7 @@ email_templates_settings = {
 }
 
 resource_servers_settings = {
-  manage = false
+  manage = true
   
   # The 'servers' map lets you define as many APIs as you want.
   # "my_main_api" is just a logical name for Terraform.
@@ -152,7 +152,7 @@ log_streams_settings = {
 
 roles_settings = {
   
-  manage = false
+  manage = true
   
   # The 'roles' map lets you define as many roles as you want.
   # "admin" and "user" are just the logical keys for Terraform.
