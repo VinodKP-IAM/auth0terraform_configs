@@ -429,11 +429,19 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
 
       - name: Download Previous State (if exists)
+        id: download-state
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
           name: terraform-state-${{ needs.determine-strategy.outputs.environment }}
           path: .
+          
+      - name: Initialize State if Missing
+        if: steps.download-state.outcome == 'failure'
+        run: |
+          echo "ℹ️ No previous state found - initializing fresh state"
+          touch terraform.tfstate
+          echo '{"version":4,"terraform_version":"${{ env.TF_VERSION }}","serial":0,"lineage":"","outputs":{},"resources":[]}' > terraform.tfstate
 
       - name: Configure Auth0 Credentials
         env:
