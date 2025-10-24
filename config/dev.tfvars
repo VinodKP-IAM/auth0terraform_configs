@@ -119,7 +119,9 @@ resource_servers_settings = {
     #   ...
     # }
   }
+  
 }
+
 
 log_streams_settings = {
   manage = true
