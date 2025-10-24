@@ -294,14 +294,43 @@ jobs:
         run: |
           set +e
           echo "📋 Running Terraform plan for ${{ needs.determine-strategy.outputs.deployment_type }} deployment..."
-          terraform plan -var-file="${{ needs.determine-strategy.outputs.tf_vars_file }}" -out=tfplan -detailed-exitcode
+          
+          # Run terraform plan and capture output
+          terraform plan -var-file="${{ needs.determine-strategy.outputs.tf_vars_file }}" -out=tfplan -detailed-exitcode 2>&1 | tee plan-raw-output.txt
           PLAN_EXIT_CODE=$?
           echo "exitcode=$PLAN_EXIT_CODE" >> $GITHUB_OUTPUT
           
           echo "Plan exit code: $PLAN_EXIT_CODE"
           
           # Generate human-readable plan
-          terraform show -no-color tfplan > plan-output.txt
+          terraform show -no-color tfplan > plan-output.txt 2>/dev/null || echo "Could not generate plan output" > plan-output.txt
+          
+          # Show plan output regardless of exit code
+          echo "📋 Terraform Plan Output:"
+          cat plan-raw-output.txt
+          
+          # Analyze plan results
+          case $PLAN_EXIT_CODE in
+            0)
+              echo "✅ No changes - infrastructure matches configuration"
+              ;;
+            1)
+              echo "❌ Plan failed - see output above for details"
+              # Show additional diagnostics for plan failures
+              echo "🔍 Diagnostic Information:"
+              echo "Terraform version: $(terraform version)"
+              echo "Working directory: $(pwd)"
+              echo "Files in directory: $(ls -la)"
+              ;;
+            2)
+              echo "📋 Changes detected - plan generated successfully"
+              # Show summary of changes
+              if grep -q "Plan:" plan-raw-output.txt; then
+                echo "📊 Change Summary:"
+                grep "Plan:" plan-raw-output.txt
+              fi
+              ;;
+          esac
           
           # Set exit code for workflow
           exit $PLAN_EXIT_CODE
@@ -314,6 +343,7 @@ jobs:
           path: |
             tfplan
             plan-output.txt
+            plan-raw-output.txt
           retention-days: 7
 
       - name: Comment Plan on PR
@@ -398,6 +428,13 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
+      - name: Download Previous State (if exists)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: terraform-state-${{ needs.determine-strategy.outputs.environment }}
+          path: .
+
       - name: Configure Auth0 Credentials
         env:
           AUTH0_DOMAIN: ${{ secrets.AUTH0_DOMAIN }}
@@ -417,6 +454,29 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: terraform-plan-${{ needs.determine-strategy.outputs.environment }}-${{ github.run_number }}
+
+      - name: Check State and Import Missing Resources
+        env:
+          AUTH0_DOMAIN: ${{ secrets.AUTH0_DOMAIN }}
+          AUTH0_CLIENT_ID: ${{ secrets.AUTH0_CLIENT_ID }}
+          AUTH0_CLIENT_SECRET: ${{ secrets.AUTH0_CLIENT_SECRET }}
+        run: |
+          echo "🔍 Checking terraform state..."
+          
+          # Check if state file exists and has resources
+          if [[ -f terraform.tfstate ]]; then
+            RESOURCE_COUNT=$(terraform state list | wc -l)
+            echo "State file exists with $RESOURCE_COUNT resources"
+            
+            if [[ $RESOURCE_COUNT -eq 0 ]]; then
+              echo "⚠️ State file is empty - may need to import existing resources"
+            else
+              echo "✅ State file contains resources:"
+              terraform state list
+            fi
+          else
+            echo "⚠️ No state file found - first run or state lost"
+          fi
 
       - name: Approval Gate for Production
         if: needs.determine-strategy.outputs.environment == 'production'
@@ -463,13 +523,98 @@ jobs:
       - name: Terraform Apply
         id: apply
         run: |
+          set +e
           echo "🚀 Deploying to ${{ needs.determine-strategy.outputs.environment }} (${{ needs.determine-strategy.outputs.deployment_type }})"
           echo "Using variables file: ${{ needs.determine-strategy.outputs.tf_vars_file }}"
-          terraform apply -auto-approve tfplan
+          
+          # Run terraform apply and capture output
+          terraform apply -auto-approve tfplan 2>&1 | tee apply-output.txt
+          APPLY_EXIT_CODE=$?
+          
+          echo "Apply exit code: $APPLY_EXIT_CODE"
+          
+          # Always show the output regardless of success/failure
+          echo "📋 Terraform Apply Output:"
+          cat apply-output.txt
+          
+          # If apply failed, show additional diagnostics
+          if [[ $APPLY_EXIT_CODE -ne 0 ]]; then
+            echo ""
+            echo "❌ Terraform Apply Failed - Diagnostic Information:"
+            echo "Exit Code: $APPLY_EXIT_CODE"
+            
+            # Show terraform state if it exists
+            if [[ -f terraform.tfstate ]]; then
+              echo "📊 Current Terraform State:"
+              terraform state list || echo "No resources in state"
+            fi
+            
+            # Show last few lines of apply output for quick diagnosis
+            echo "🔍 Last 20 lines of apply output:"
+            tail -20 apply-output.txt
+            
+            # Check for specific error patterns
+            if grep -q "409 Conflict" apply-output.txt; then
+              echo ""
+              echo "🔧 DETECTED: 409 Conflict Errors"
+              echo "This means resources already exist in Auth0."
+              echo "Solutions:"
+              echo "1. Import existing resources: terraform import <resource_address> <resource_id>"
+              echo "2. Use unique resource names in your configuration"
+              echo "3. Delete existing resources in Auth0 Dashboard (destructive)"
+              echo ""
+              echo "Conflicting resources found:"
+              grep -A 2 -B 2 "409 Conflict" apply-output.txt || echo "Could not extract conflict details"
+            fi
+            
+            if grep -q "403 Forbidden" apply-output.txt; then
+              echo ""
+              echo "🔧 DETECTED: 403 Forbidden Errors"
+              echo "This usually means:"
+              echo "1. Insufficient Auth0 Management API permissions"
+              echo "2. Free tier limitations (client/app limits)"
+              echo "3. Auth0 subscription restrictions"
+            fi
+          fi
+          
+          exit $APPLY_EXIT_CODE
+
+      - name: Upload State File for Next Run
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: terraform-state-${{ needs.determine-strategy.outputs.environment }}
+          path: |
+            terraform.tfstate
+            terraform.tfstate.backup
+          retention-days: 90
+
+      - name: Upload Apply Output Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: terraform-apply-output-${{ needs.determine-strategy.outputs.environment }}-${{ github.run_number }}
+          path: |
+            apply-output.txt
+            terraform.tfstate*
+          retention-days: 30
 
       - name: Generate Deployment Summary
+        if: always()
         run: |
-          echo "## 🎉 Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          # Determine deployment status
+          if [[ "${{ steps.apply.outcome }}" == "success" ]]; then
+            echo "## 🎉 Deployment Complete" >> $GITHUB_STEP_SUMMARY
+            STATUS_EMOJI="🎉"
+            STATUS_TEXT="SUCCESS"
+          else
+            echo "## ❌ Deployment Failed" >> $GITHUB_STEP_SUMMARY
+            STATUS_EMOJI="❌"
+            STATUS_TEXT="FAILED"
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** $STATUS_EMOJI $STATUS_TEXT" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
@@ -480,9 +625,33 @@ jobs:
           echo "| **Commit** | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Vars File** | ${{ needs.determine-strategy.outputs.tf_vars_file }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📊 Terraform Outputs" >> $GITHUB_STEP_SUMMARY
+          
+          # Show terraform outputs if successful
+          if [[ "${{ steps.apply.outcome }}" == "success" ]]; then
+            echo "### 📊 Terraform Outputs" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            terraform output -no-color >> $GITHUB_STEP_SUMMARY || echo "No outputs available" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Always show apply output if it exists
+          if [[ -f apply-output.txt ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 📋 Terraform Apply Output" >> $GITHUB_STEP_SUMMARY
+            echo "<details>" >> $GITHUB_STEP_SUMMARY
+            echo "<summary>Click to expand full apply output</summary>" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            cat apply-output.txt >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "</details>" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Show current terraform state
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📊 Current Terraform State" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          terraform output -no-color >> $GITHUB_STEP_SUMMARY || echo "No outputs available" >> $GITHUB_STEP_SUMMARY
+          terraform state list >> $GITHUB_STEP_SUMMARY || echo "No resources in state" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
   # Create release tag for successful production deployments

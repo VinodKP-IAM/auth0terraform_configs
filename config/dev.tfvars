@@ -122,7 +122,8 @@ resource_servers_settings = {
 }
 
 log_streams_settings = {
-  manage = false
+  manage = true
+
   
   streams = {
     "dev_webhook" = {
