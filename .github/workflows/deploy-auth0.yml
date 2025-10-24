@@ -542,15 +542,13 @@ jobs:
             echo "State file exists with $RESOURCE_COUNT resources"
             
             if [[ $RESOURCE_COUNT -eq 0 ]]; then
-              echo "⚠️ State file is empty - importing existing resources"
-              pwsh ./scripts/check-and-import-resources.ps1 -Auth0Domain "$AUTH0_DOMAIN" -Auth0ClientId "$AUTH0_CLIENT_ID" -Auth0ClientSecret "$AUTH0_CLIENT_SECRET"
+              echo "⚠️ State file is empty - will attempt to import resources during apply"
             else
               echo "✅ State file contains resources:"
               terraform state list
             fi
           else
-            echo "⚠️ No state file found - importing existing resources"
-            pwsh ./scripts/check-and-import-resources.ps1 -Auth0Domain "$AUTH0_DOMAIN" -Auth0ClientId "$AUTH0_CLIENT_ID" -Auth0ClientSecret "$AUTH0_CLIENT_SECRET"
+            echo "⚠️ No state file found - first run"
           fi
 
       - name: Approval Gate for Production
