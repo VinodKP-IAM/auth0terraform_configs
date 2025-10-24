@@ -446,13 +446,15 @@ jobs:
           
           # List workflow runs
           echo "Recent workflow runs:"
-          gh run list --workflow=deploy-auth0.yml --limit 5 --json databaseId,status,conclusion \
-            --jq '.[] | {id: .databaseId, status: .status, conclusion: .conclusion}'
-          
-          # List artifacts from successful runs
-          echo "📦 Looking for state artifacts..."
-          SUCCESSFUL_RUNS=$(gh run list --workflow=deploy-auth0.yml --json databaseId,conclusion \
-            --jq '.[] | select(.conclusion=="success") | .databaseId')
+          gh run list --workflow=deploy-auth0.yml --limit 5 \
+            --json name,databaseId,status,conclusion,createdAt \
+            --jq '.[] | {
+              name: .name,
+              id: .databaseId,
+              status: .status,
+              conclusion: .conclusion,
+              created: .createdAt
+            }'
           
           for RUN_ID in $SUCCESSFUL_RUNS; do
             echo "Checking run $RUN_ID..."
@@ -746,6 +748,38 @@ jobs:
           echo "Resources in plan:"
           terraform show tfplan | grep -E '(^  # |resource ")' || echo "No resources in plan"
 
+      - name: Ensure Clean State
+        run: |
+          echo "🧹 Ensuring clean state before apply..."
+          
+          # Create .terraform directory if it doesn't exist
+          mkdir -p .terraform
+          
+          # Backup current state if it exists
+          if [ -f terraform.tfstate ]; then
+            cp terraform.tfstate "terraform.tfstate.backup.$(date +%Y%m%d_%H%M%S)"
+            echo "✅ Created state backup"
+          fi
+          
+          # Initialize empty state if none exists
+          if [ ! -f terraform.tfstate ]; then
+            echo '{
+              "version": 4,
+              "terraform_version": "${{ env.TF_VERSION }}",
+              "serial": 0,
+              "lineage": "'$(uuidgen)'",
+              "outputs": {},
+              "resources": []
+            }' > terraform.tfstate
+            echo "✅ Initialized empty state file"
+          fi
+          
+          echo "📁 Current directory contents:"
+          ls -la
+          
+          echo "State file contents:"
+          cat terraform.tfstate | jq .
+
       - name: Terraform Apply
         id: apply
         run: |
@@ -895,18 +929,45 @@ jobs:
             echo "✅ Created timestamped state backup"
           fi
 
+      - name: Prepare State for Upload
+        if: always()
+        run: |
+          echo "📦 Preparing state files for upload..."
+          
+          # Create state directory
+          mkdir -p terraform_state
+          
+          # Copy state files if they exist
+          if [ -f terraform.tfstate ]; then
+            cp terraform.tfstate terraform_state/
+            echo "✅ Copied main state file"
+          else
+            echo "⚠️ No main state file found"
+          fi
+          
+          if [ -f terraform.tfstate.backup ]; then
+            cp terraform.tfstate.backup terraform_state/
+            echo "✅ Copied backup state file"
+          fi
+          
+          # Copy .terraform directory
+          if [ -d .terraform ]; then
+            cp -r .terraform terraform_state/
+            echo "✅ Copied .terraform directory"
+          fi
+          
+          echo "📁 Files prepared for upload:"
+          ls -la terraform_state/
+
       - name: Upload State File for Next Run
         id: upload-state
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: terraform-state-${{ needs.determine-strategy.outputs.environment }}
-          path: |
-            terraform.tfstate
-            terraform.tfstate.backup
-            .terraform/**/*
+          path: terraform_state
           retention-days: 90
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: List Artifacts in GitHub
         if: always()
