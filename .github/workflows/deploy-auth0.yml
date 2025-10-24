@@ -223,6 +223,7 @@ jobs:
     
     outputs:
       plan-exitcode: ${{ steps.plan.outputs.exitcode }}
+      state-lineage: ${{ steps.lineage.outputs.lineage }}
       
     steps:
       - name: Checkout Repository
@@ -435,13 +436,32 @@ jobs:
         with:
           name: terraform-state-${{ needs.determine-strategy.outputs.environment }}
           path: .
-          
-      - name: Initialize State if Missing
-        if: steps.download-state.outcome == 'failure'
+
+      - name: Generate State Lineage
+        id: lineage
         run: |
-          echo "ℹ️ No previous state found - initializing fresh state"
-          touch terraform.tfstate
-          echo '{"version":4,"terraform_version":"${{ env.TF_VERSION }}","serial":0,"lineage":"","outputs":{},"resources":[]}' > terraform.tfstate
+          if [ ! -f terraform.tfstate ]; then
+            # Generate a unique lineage ID
+            LINEAGE=$(uuidgen || cat /proc/sys/kernel/random/uuid)
+            echo "lineage=$LINEAGE" >> $GITHUB_OUTPUT
+            
+            # Create initial state with the lineage
+            echo '{
+              "version": 4,
+              "terraform_version": "${{ env.TF_VERSION }}",
+              "serial": 0,
+              "lineage": "'$LINEAGE'",
+              "outputs": {},
+              "resources": []
+            }' > terraform.tfstate
+            
+            echo "Created new state file with lineage: $LINEAGE"
+          else
+            # Extract existing lineage
+            LINEAGE=$(jq -r '.lineage' terraform.tfstate)
+            echo "lineage=$LINEAGE" >> $GITHUB_OUTPUT
+            echo "Using existing state lineage: $LINEAGE"
+          fi
 
       - name: Configure Auth0 Credentials
         env:
@@ -462,6 +482,23 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: terraform-plan-${{ needs.determine-strategy.outputs.environment }}-${{ github.run_number }}
+          
+      - name: Verify State Lineage
+        run: |
+          # Extract lineage from current state
+          CURRENT_LINEAGE=$(jq -r '.lineage' terraform.tfstate)
+          EXPECTED_LINEAGE="${{ needs.terraform-plan.outputs.state-lineage }}"
+          
+          echo "Current state lineage: $CURRENT_LINEAGE"
+          echo "Expected lineage from plan: $EXPECTED_LINEAGE"
+          
+          if [ "$CURRENT_LINEAGE" != "$EXPECTED_LINEAGE" ]; then
+            echo "::error::State lineage mismatch. Plan was created with a different state."
+            echo "To fix this:"
+            echo "1. Clear the workflow artifacts"
+            echo "2. Re-run the workflow to create a fresh state"
+            exit 1
+          fi
 
       - name: Check State and Import Missing Resources
         env:
