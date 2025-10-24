@@ -223,6 +223,7 @@ jobs:
     
     outputs:
       plan-exitcode: ${{ steps.plan.outputs.exitcode }}
+      state-lineage: ${{ steps.lineage.outputs.lineage }}
       
     steps:
       - name: Checkout Repository
@@ -294,14 +295,52 @@ jobs:
         run: |
           set +e
           echo "📋 Running Terraform plan for ${{ needs.determine-strategy.outputs.deployment_type }} deployment..."
-          terraform plan -var-file="${{ needs.determine-strategy.outputs.tf_vars_file }}" -out=tfplan -detailed-exitcode
+          
+          # Capture the current state lineage before planning
+          if [ -f terraform.tfstate ]; then
+            LINEAGE=$(jq -r '.lineage' terraform.tfstate)
+            echo "state_lineage=$LINEAGE" >> $GITHUB_OUTPUT
+            echo "Using state lineage: $LINEAGE"
+          else
+            echo "No existing state file found"
+          fi
+          
+          # Run terraform plan and capture output
+          terraform plan -var-file="${{ needs.determine-strategy.outputs.tf_vars_file }}" -out=tfplan -detailed-exitcode 2>&1 | tee plan-raw-output.txt
           PLAN_EXIT_CODE=$?
           echo "exitcode=$PLAN_EXIT_CODE" >> $GITHUB_OUTPUT
           
           echo "Plan exit code: $PLAN_EXIT_CODE"
           
           # Generate human-readable plan
-          terraform show -no-color tfplan > plan-output.txt
+          terraform show -no-color tfplan > plan-output.txt 2>/dev/null || echo "Could not generate plan output" > plan-output.txt
+          
+          # Show plan output regardless of exit code
+          echo "📋 Terraform Plan Output:"
+          cat plan-raw-output.txt
+          
+          # Analyze plan results
+          case $PLAN_EXIT_CODE in
+            0)
+              echo "✅ No changes - infrastructure matches configuration"
+              ;;
+            1)
+              echo "❌ Plan failed - see output above for details"
+              # Show additional diagnostics for plan failures
+              echo "🔍 Diagnostic Information:"
+              echo "Terraform version: $(terraform version)"
+              echo "Working directory: $(pwd)"
+              echo "Files in directory: $(ls -la)"
+              ;;
+            2)
+              echo "📋 Changes detected - plan generated successfully"
+              # Show summary of changes
+              if grep -q "Plan:" plan-raw-output.txt; then
+                echo "📊 Change Summary:"
+                grep "Plan:" plan-raw-output.txt
+              fi
+              ;;
+          esac
           
           # Set exit code for workflow
           exit $PLAN_EXIT_CODE
@@ -314,6 +353,7 @@ jobs:
           path: |
             tfplan
             plan-output.txt
+            plan-raw-output.txt
           retention-days: 7
 
       - name: Comment Plan on PR
@@ -398,6 +438,149 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
+      - name: List Available State Artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🔍 Checking available state artifacts..."
+          
+          # List workflow runs
+          echo "Recent workflow runs:"
+          gh run list --workflow=deploy-auth0.yml --limit 5 \
+            --json name,databaseId,status,conclusion,createdAt \
+            --jq '.[] | {
+              name: .name,
+              id: .databaseId,
+              status: .status,
+              conclusion: .conclusion,
+              created: .createdAt
+            }'
+          
+          for RUN_ID in $SUCCESSFUL_RUNS; do
+            echo "Checking run $RUN_ID..."
+            gh run view $RUN_ID --json artifacts \
+              --jq '.artifacts[] | select(.name | contains("terraform-state")) | {name: .name, size: .size, expired: .expired}'
+          done
+
+      - name: Download Previous State
+        id: download-state
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: terraform-state-${{ needs.determine-strategy.outputs.environment }}
+          path: .
+          
+      - name: State Download Verification
+        run: |
+          echo "🔍 State Download Verification"
+          echo "==========================="
+          
+          echo "1️⃣ Workspace Content Check"
+          echo "Current directory contents:"
+          ls -la
+          
+          echo "2️⃣ State File Check"
+          if [ -f terraform.tfstate ]; then
+            echo "✅ terraform.tfstate found"
+            echo "File details:"
+            ls -la terraform.tfstate
+            
+            echo "State validity check:"
+            if jq empty terraform.tfstate 2>/dev/null; then
+              echo "✅ State file is valid JSON"
+              
+              echo "State file structure:"
+              jq -r '{
+                version: .version,
+                terraform_version: .terraform_version,
+                serial: .serial,
+                lineage: .lineage,
+                resource_count: (.resources | length)
+              }' terraform.tfstate
+              
+              echo "Resources in state:"
+              jq -r '.resources[] | "- \(.type).\(.name)"' terraform.tfstate
+            else
+              echo "❌ State file is not valid JSON!"
+              echo "State file contents:"
+              cat terraform.tfstate
+            fi
+          else
+            echo "⚠️ No terraform.tfstate found - this might be the first run"
+          fi
+          
+          echo "3️⃣ Backup State Check"
+          if [ -f terraform.tfstate.backup ]; then
+            echo "✅ Backup state file found"
+            echo "Backup file details:"
+            ls -la terraform.tfstate.backup
+          else
+            echo "ℹ️ No backup state file found"
+          fi
+          
+          echo "4️⃣ Previous Artifacts Check"
+          if [ -d .terraform ]; then
+            echo "✅ .terraform directory exists"
+            echo ".terraform contents:"
+            ls -la .terraform/
+          else
+            echo "ℹ️ No .terraform directory found - will be created during init"
+          fi
+          
+      - name: Debug State Download
+        run: |
+          echo "📁 Workspace contents after state download:"
+          ls -la
+          if [ -f terraform.tfstate ]; then
+            echo "✅ terraform.tfstate found"
+            echo "State file contents summary:"
+            jq -r '{version, terraform_version, serial, lineage, resources: (.resources | length)}' terraform.tfstate
+          else
+            echo "❌ terraform.tfstate not found"
+          fi
+          
+      - name: Ensure State Directory Exists
+        run: |
+          mkdir -p .terraform
+          
+      - name: Generate State Lineage
+        id: lineage
+        run: |
+          if [ ! -f terraform.tfstate ]; then
+            echo "⚠️ No existing state file found - creating new one"
+            # Generate a unique lineage ID
+            LINEAGE=$(uuidgen || cat /proc/sys/kernel/random/uuid)
+            
+            # Create initial state with the lineage
+            echo '{
+              "version": 4,
+              "terraform_version": "${{ env.TF_VERSION }}",
+              "serial": 0,
+              "lineage": "'$LINEAGE'",
+              "outputs": {},
+              "resources": []
+            }' > terraform.tfstate
+            
+            echo "Created new state file with lineage: $LINEAGE"
+          else
+            echo "✅ Using existing state file"
+            # Extract existing lineage
+            LINEAGE=$(jq -r '.lineage' terraform.tfstate)
+            echo "Using existing state lineage: $LINEAGE"
+            
+            # Backup existing state
+            cp terraform.tfstate terraform.tfstate.backup
+            echo "Created backup of existing state file"
+          fi
+          
+          # Always set the lineage output
+          echo "lineage=$LINEAGE" >> "$GITHUB_OUTPUT"
+          echo "Current lineage is: $LINEAGE"
+          
+          # Debug state file
+          echo "Current state file contents:"
+          jq -r '{version, terraform_version, serial, lineage, resources: (.resources | length)}' terraform.tfstate
+
       - name: Configure Auth0 Credentials
         env:
           AUTH0_DOMAIN: ${{ secrets.AUTH0_DOMAIN }}
@@ -417,6 +600,63 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: terraform-plan-${{ needs.determine-strategy.outputs.environment }}-${{ github.run_number }}
+          
+      - name: Verify State Lineage
+        run: |
+          if [ ! -f terraform.tfstate ]; then
+            echo "No state file found - will proceed with plan"
+            exit 0
+          fi
+          
+          # Extract lineage from current state
+          CURRENT_LINEAGE=$(jq -r '.lineage' terraform.tfstate)
+          EXPECTED_LINEAGE="${{ needs.terraform-plan.outputs.state-lineage }}"
+          
+          echo "Current state lineage: $CURRENT_LINEAGE"
+          echo "Expected lineage from plan: $EXPECTED_LINEAGE"
+          
+          # If we don't have an expected lineage, this might be first run
+          if [ -z "$EXPECTED_LINEAGE" ]; then
+            echo "No expected lineage found - this might be the first run"
+            echo "Will proceed with current state"
+            exit 0
+          fi
+          
+          if [ "$CURRENT_LINEAGE" != "$EXPECTED_LINEAGE" ]; then
+            echo "::error::State lineage mismatch. Plan was created with a different state."
+            echo "To fix this:"
+            echo "1. Clear the workflow artifacts"
+            echo "2. Re-run the workflow to create a fresh state"
+            echo ""
+            echo "Current lineage: $CURRENT_LINEAGE"
+            echo "Expected lineage: $EXPECTED_LINEAGE"
+            exit 1
+          fi
+          
+          echo "✅ State lineage verified successfully"
+
+      - name: Check State and Import Missing Resources
+        env:
+          AUTH0_DOMAIN: ${{ secrets.AUTH0_DOMAIN }}
+          AUTH0_CLIENT_ID: ${{ secrets.AUTH0_CLIENT_ID }}
+          AUTH0_CLIENT_SECRET: ${{ secrets.AUTH0_CLIENT_SECRET }}
+        run: |
+          echo "🔍 Checking terraform state..."
+          
+          # Check if state file exists and has resources
+          if [[ -f terraform.tfstate ]]; then
+            RESOURCE_COUNT=$(terraform state list | wc -l)
+            echo "State file exists with $RESOURCE_COUNT resources"
+            
+            if [[ $RESOURCE_COUNT -eq 0 ]]; then
+              echo "⚠️ State file is empty - will attempt to import resources during apply"
+            else
+              echo "✅ State file contains resources:"
+              terraform state list
+            fi
+          else
+            echo "⚠️ No state file found - first run"
+          fi
 
       - name: Approval Gate for Production
         if: needs.determine-strategy.outputs.environment == 'production'
@@ -460,16 +700,350 @@ jobs:
             echo "  • Production tenant backup recommended"
           fi
 
+      - name: Pre-Apply State Verification
+        run: |
+          echo "🔍 Pre-Apply State Verification"
+          echo "==============================="
+          
+          echo "1️⃣ Terraform State File Check"
+          if [ -f terraform.tfstate ]; then
+            echo "✅ terraform.tfstate exists"
+            echo "File size: $(stat -f%z terraform.tfstate) bytes"
+            echo "Last modified: $(stat -f%Sm terraform.tfstate)"
+            echo "State file summary:"
+            jq -r '{
+              version: .version,
+              terraform_version: .terraform_version,
+              serial: .serial,
+              lineage: .lineage,
+              resource_count: (.resources | length),
+              resources: [.resources[] | {type: .type, name: .name}]
+            }' terraform.tfstate
+          else
+            echo "❌ terraform.tfstate not found!"
+          fi
+          
+          echo "2️⃣ Terraform Lock File Check"
+          if [ -f .terraform.lock.hcl ]; then
+            echo "✅ .terraform.lock.hcl exists"
+            cat .terraform.lock.hcl
+          else
+            echo "⚠️ .terraform.lock.hcl not found"
+          fi
+          
+          echo "3️⃣ Provider Configuration Check"
+          if [ -d .terraform/providers ]; then
+            echo "✅ Provider directory exists"
+            ls -la .terraform/providers
+          else
+            echo "⚠️ No provider directory found"
+          fi
+          
+          echo "4️⃣ Current Terraform Workspace"
+          terraform workspace show
+          
+          echo "5️⃣ Planned Resources vs State"
+          echo "Resources in state:"
+          terraform state list || echo "No resources in state"
+          echo "Resources in plan:"
+          terraform show tfplan | grep -E '(^  # |resource ")' || echo "No resources in plan"
+
+      - name: Ensure Clean State
+        run: |
+          echo "🧹 Ensuring clean state before apply..."
+          
+          # Create .terraform directory if it doesn't exist
+          mkdir -p .terraform
+          
+          # Backup current state if it exists
+          if [ -f terraform.tfstate ]; then
+            cp terraform.tfstate "terraform.tfstate.backup.$(date +%Y%m%d_%H%M%S)"
+            echo "✅ Created state backup"
+          fi
+          
+          # Initialize empty state if none exists
+          if [ ! -f terraform.tfstate ]; then
+            echo '{
+              "version": 4,
+              "terraform_version": "${{ env.TF_VERSION }}",
+              "serial": 0,
+              "lineage": "'$(uuidgen)'",
+              "outputs": {},
+              "resources": []
+            }' > terraform.tfstate
+            echo "✅ Initialized empty state file"
+          fi
+          
+          echo "📁 Current directory contents:"
+          ls -la
+          
+          echo "State file contents:"
+          cat terraform.tfstate | jq .
+
       - name: Terraform Apply
         id: apply
         run: |
+          set +e
           echo "🚀 Deploying to ${{ needs.determine-strategy.outputs.environment }} (${{ needs.determine-strategy.outputs.deployment_type }})"
           echo "Using variables file: ${{ needs.determine-strategy.outputs.tf_vars_file }}"
-          terraform apply -auto-approve tfplan
+          
+          # Run terraform apply and capture output
+          terraform apply -auto-approve tfplan 2>&1 | tee apply-output.txt
+          APPLY_EXIT_CODE=$?
+          
+          echo "Apply exit code: $APPLY_EXIT_CODE"
+          
+          # Always show the output regardless of success/failure
+          echo "📋 Terraform Apply Output:"
+          cat apply-output.txt
+          
+          # If apply failed, show additional diagnostics
+          if [[ $APPLY_EXIT_CODE -ne 0 ]]; then
+            echo ""
+            echo "❌ Terraform Apply Failed - Diagnostic Information:"
+            echo "Exit Code: $APPLY_EXIT_CODE"
+            
+            # Show terraform state if it exists
+            if [[ -f terraform.tfstate ]]; then
+              echo "📊 Current Terraform State:"
+              terraform state list || echo "No resources in state"
+            fi
+            
+            # Show last few lines of apply output for quick diagnosis
+            echo "🔍 Last 20 lines of apply output:"
+            tail -20 apply-output.txt
+            
+            # Check for specific error patterns
+            if grep -q "409 Conflict" apply-output.txt; then
+              echo ""
+              echo "🔧 DETECTED: 409 Conflict Errors"
+              echo "This means resources already exist in Auth0."
+              echo "Solutions:"
+              echo "1. Import existing resources: terraform import <resource_address> <resource_id>"
+              echo "2. Use unique resource names in your configuration"
+              echo "3. Delete existing resources in Auth0 Dashboard (destructive)"
+              echo ""
+              echo "Conflicting resources found:"
+              grep -A 2 -B 2 "409 Conflict" apply-output.txt || echo "Could not extract conflict details"
+            fi
+            
+            if grep -q "403 Forbidden" apply-output.txt; then
+              echo ""
+              echo "🔧 DETECTED: 403 Forbidden Errors"
+              echo "This usually means:"
+              echo "1. Insufficient Auth0 Management API permissions"
+              echo "2. Free tier limitations (client/app limits)"
+              echo "3. Auth0 subscription restrictions"
+            fi
+          fi
+          
+          exit $APPLY_EXIT_CODE
+
+      - name: Verify State After Apply
+        if: always()
+        run: |
+          echo "🔍 Post-Apply State Verification"
+          echo "============================="
+          
+          echo "1️⃣ State File Verification"
+          if [ -f terraform.tfstate ]; then
+            echo "✅ terraform.tfstate exists"
+            echo "File details:"
+            ls -la terraform.tfstate
+            
+            echo "State contents:"
+            jq -r '{
+              version: .version,
+              terraform_version: .terraform_version,
+              serial: .serial,
+              lineage: .lineage,
+              resource_count: (.resources | length),
+              resources: [.resources[] | {
+                type: .type,
+                name: .name,
+                provider: .provider_name,
+                mode: .mode
+              }]
+            }' terraform.tfstate
+            
+            echo "Comparing state with previous:"
+            if [ -f terraform.tfstate.backup ]; then
+              echo "Changes from previous state:"
+              diff -u <(jq -r '.resources[] | .type + "." + .name' terraform.tfstate.backup) \
+                     <(jq -r '.resources[] | .type + "." + .name' terraform.tfstate) || true
+            else
+              echo "No previous state backup found"
+            fi
+          else
+            echo "❌ ERROR: State file not found after apply!"
+            exit 1
+          fi
+          
+          echo "2️⃣ Resource State Verification"
+          echo "Current resources in state:"
+          terraform state list || echo "No resources in state"
+          
+          echo "3️⃣ Auth0 Resource Verification"
+          # Get Auth0 token
+          TOKEN_RESPONSE=$(curl -s -X POST "https://${{ secrets.AUTH0_DOMAIN }}/oauth/token" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "client_id": "${{ secrets.AUTH0_CLIENT_ID }}",
+              "client_secret": "${{ secrets.AUTH0_CLIENT_SECRET }}",
+              "audience": "https://${{ secrets.AUTH0_DOMAIN }}/api/v2/",
+              "grant_type": "client_credentials"
+            }')
+          
+          ACCESS_TOKEN=$(echo $TOKEN_RESPONSE | jq -r '.access_token')
+          
+          if [[ -n "$ACCESS_TOKEN" && "$ACCESS_TOKEN" != "null" ]]; then
+            echo "✅ Successfully obtained Auth0 token"
+            
+            # Check Auth0 resources
+            echo "Checking Auth0 resources..."
+            
+            # Check clients
+            CLIENTS=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+              "https://${{ secrets.AUTH0_DOMAIN }}/api/v2/clients")
+            echo "Auth0 Clients found: $(echo $CLIENTS | jq -r 'length')"
+            
+            # Check resource servers
+            RESOURCE_SERVERS=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+              "https://${{ secrets.AUTH0_DOMAIN }}/api/v2/resource-servers")
+            echo "Auth0 Resource Servers found: $(echo $RESOURCE_SERVERS | jq -r 'length')"
+            
+            # Compare with state
+            echo "Comparing Auth0 resources with Terraform state..."
+            STATE_CLIENTS=$(terraform state list | grep "auth0_client" || echo "")
+            STATE_RESOURCE_SERVERS=$(terraform state list | grep "auth0_resource_server" || echo "")
+            
+            echo "Clients in Terraform state: $(echo "$STATE_CLIENTS" | wc -l)"
+            echo "Resource Servers in Terraform state: $(echo "$STATE_RESOURCE_SERVERS" | wc -l)"
+          else
+            echo "⚠️ Could not verify Auth0 resources - token acquisition failed"
+          fi
+          
+          echo "4️⃣ State File Backup"
+          if [ -f terraform.tfstate ]; then
+            cp terraform.tfstate "terraform.tfstate.$(date +%Y%m%d_%H%M%S).backup"
+            echo "✅ Created timestamped state backup"
+          fi
+
+      - name: Prepare State for Upload
+        if: always()
+        run: |
+          echo "📦 Preparing state files for upload..."
+          
+          # Create state directory
+          mkdir -p terraform_state
+          
+          # Copy state files if they exist
+          if [ -f terraform.tfstate ]; then
+            cp terraform.tfstate terraform_state/
+            echo "✅ Copied main state file"
+          else
+            echo "⚠️ No main state file found"
+          fi
+          
+          if [ -f terraform.tfstate.backup ]; then
+            cp terraform.tfstate.backup terraform_state/
+            echo "✅ Copied backup state file"
+          fi
+          
+          # Copy .terraform directory
+          if [ -d .terraform ]; then
+            cp -r .terraform terraform_state/
+            echo "✅ Copied .terraform directory"
+          fi
+          
+          echo "📁 Files prepared for upload:"
+          ls -la terraform_state/
+
+      - name: Upload State File for Next Run
+        id: upload-state
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: terraform-state-${{ needs.determine-strategy.outputs.environment }}
+          path: terraform_state
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: List Artifacts in GitHub
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🔍 Checking artifacts in GitHub..."
+          
+          # List workflow runs to get run ID
+          RUN_ID=$(gh run list --workflow=deploy-auth0.yml --json databaseId --jq '.[0].databaseId')
+          echo "Current Run ID: $RUN_ID"
+          
+          # List artifacts for this workflow run
+          echo "📦 Artifacts for this run:"
+          gh run view $RUN_ID --json artifacts --jq '.artifacts[] | {name: .name, size: .size, expired: .expired}'
+          
+          # Download and verify state artifact
+          echo "🔍 Verifying state artifact contents..."
+          TEMP_DIR=$(mktemp -d)
+          gh run download $RUN_ID --name "terraform-state-${{ needs.determine-strategy.outputs.environment }}" --dir $TEMP_DIR
+          
+          if [ -f "$TEMP_DIR/terraform.tfstate" ]; then
+            echo "✅ State file found in artifact"
+            echo "State file contents summary:"
+            jq -r '{
+              version: .version,
+              terraform_version: .terraform_version,
+              serial: .serial,
+              lineage: .lineage,
+              resource_count: (.resources | length),
+              resources: [.resources[] | .type + "." + .name]
+            }' "$TEMP_DIR/terraform.tfstate"
+          else
+            echo "❌ State file not found in downloaded artifact!"
+            echo "Contents of downloaded artifact:"
+            ls -R $TEMP_DIR
+          fi
+          
+          # Cleanup
+          rm -rf $TEMP_DIR
+
+      - name: Verify Artifact Upload
+        if: always()
+        run: |
+          echo "🔍 Verifying artifact upload..."
+          # List the uploaded artifacts
+          echo "Artifacts that should have been uploaded:"
+          ls -la terraform.tfstate* || echo "No state files found"
+          ls -la .terraform/ || echo "No .terraform directory found"
+
+      - name: Upload Apply Output Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: terraform-apply-output-${{ needs.determine-strategy.outputs.environment }}-${{ github.run_number }}
+          path: |
+            apply-output.txt
+            terraform.tfstate*
+          retention-days: 30
 
       - name: Generate Deployment Summary
+        if: always()
         run: |
-          echo "## 🎉 Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          # Determine deployment status
+          if [[ "${{ steps.apply.outcome }}" == "success" ]]; then
+            echo "## 🎉 Deployment Complete" >> $GITHUB_STEP_SUMMARY
+            STATUS_EMOJI="🎉"
+            STATUS_TEXT="SUCCESS"
+          else
+            echo "## ❌ Deployment Failed" >> $GITHUB_STEP_SUMMARY
+            STATUS_EMOJI="❌"
+            STATUS_TEXT="FAILED"
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** $STATUS_EMOJI $STATUS_TEXT" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
@@ -480,9 +1054,33 @@ jobs:
           echo "| **Commit** | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Vars File** | ${{ needs.determine-strategy.outputs.tf_vars_file }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📊 Terraform Outputs" >> $GITHUB_STEP_SUMMARY
+          
+          # Show terraform outputs if successful
+          if [[ "${{ steps.apply.outcome }}" == "success" ]]; then
+            echo "### 📊 Terraform Outputs" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            terraform output -no-color >> $GITHUB_STEP_SUMMARY || echo "No outputs available" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Always show apply output if it exists
+          if [[ -f apply-output.txt ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 📋 Terraform Apply Output" >> $GITHUB_STEP_SUMMARY
+            echo "<details>" >> $GITHUB_STEP_SUMMARY
+            echo "<summary>Click to expand full apply output</summary>" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            cat apply-output.txt >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "</details>" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Show current terraform state
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📊 Current Terraform State" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          terraform output -no-color >> $GITHUB_STEP_SUMMARY || echo "No outputs available" >> $GITHUB_STEP_SUMMARY
+          terraform state list >> $GITHUB_STEP_SUMMARY || echo "No resources in state" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
   # Create release tag for successful production deployments

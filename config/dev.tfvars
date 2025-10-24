@@ -6,12 +6,10 @@
 # To add a new setting (e.g., picture_url), you just add a new line here.
 tenant_settings = {
   manage              = true
-  friendly_name       = "My New TenantssS"
-  session_lifetime         = 72
-  maximum_session_lifetime = 168
-  support_email       = "dev-support@mycompany.com"
+  friendly_name       = "ITCyberSec Solutions"  # Match existing tenant name
+  session_lifetime    = 168  # Match existing setting
+  support_email       = "vinodkumar.kp05@gmail.com"  # Match existing setting
   allowed_logout_urls = ["http://localhost:3000/logout"]
-  # picture_url         = "https://my-company.com/logo.png" # Example if you wanted to add this
 }
 
 prompt_settings = {
@@ -99,63 +97,24 @@ email_templates_settings = {
 
 resource_servers_settings = {
   manage = true
-  
-  # The 'servers' map lets you define as many APIs as you want.
-  # "my_main_api" is just a logical name for Terraform.
   servers = {
     "my_main_api" = {
       name                 = "My Main API (Dev)"
       identifier           = "https://api.my-dev-company.com"
       signing_alg          = "RS256"
       allow_offline_access = true
-      token_lifetime       = 7200 # 2 hours
+      token_lifetime       = 7200
       skip_consent_for_verifiable_first_party_clients = true
     }
-    
-    # You could add another API here if you wanted
-    # "my_second_api" = {
-    #   name       = "My Second API (Dev)"
-    #   identifier = "https://api2.my-dev-company.com"
-    #   ...
-    # }
   }
 }
-
 log_streams_settings = {
-  manage = false
-  
-  streams = {
-    "dev_webhook" = {
-      name   = "Dev HTTP Webhook"
-      type   = "http"
-      status = "active"
-      
-      sink = {
-        http_endpoint       = "https://my-dev-webhook.site/logs"
-        http_content_format = "JSONARRAY"
-        http_content_type   = "application/json"
-      }
-      
-      filters = [
-        {
-          type = "category"
-          name = "auth.login.fail"
-        },
-        {
-          type = "category"
-          name = "auth.signup.fail"
-        }
-      ]
-    }
-  }
+  manage = false  # Temporarily disabled due to free tier limitations
+  streams = {}
 }
 
 roles_settings = {
-  
   manage = true
-  
-  # The 'roles' map lets you define as many roles as you want.
-  # "admin" and "user" are just the logical keys for Terraform.
   roles = {
     "admin" = {
       name        = "Administrator"
@@ -171,47 +130,8 @@ roles_settings = {
 
 
 clients_settings = {
-  
-  manage = true
-  
-  # The 'clients' map defines your applications.
-  clients = {
-    "my_spa_app" = {
-      name            = "My SPA Application (Dev)"
-      description     = "Primary single-page application for Dev"
-      app_type        = "spa"
-      callbacks       = ["http://localhost:3000/callback"]
-      allowed_origins = ["http://localhost:3000"]
-      web_origins     = ["http://localhost:3000"]
-      allowed_logout_urls = ["http://localhost:3000"]
-      grant_types     = ["authorization_code", "refresh_token"]
-      oidc_conformant = true
-      is_first_party  = true
-      
-      jwt_configuration = {
-        alg                 = "RS256"
-        lifetime_in_seconds = 3600 # 1 hour
-        secret_encoded      = false
-      }
-      
-      refresh_token = {
-        rotation_type   = "rotating"
-        expiration_type = "expiring"
-        token_lifetime  = 2592000 # 30 days
-      }
-    }
-
-    "my_backend_m2m" = {
-      name        = "My Backend M2M Client (Dev)"
-      description = "Machine-to-machine client for backend services"
-      app_type    = "non_interactive"
-      grant_types = ["client_credentials"]
-      
-      # Example: Allow this M2M client to call the API we defined earlier
-      # allowed_clients = [ module.my_resource_servers.auth0_resource_server.this["my_main_api"].client_id ] 
-      # Note: To use module outputs like this, you'd need to define outputs in the resource server module.
-    }
-  }
+  manage = false  # Temporarily disabled due to free tier limitations
+  clients = {}
 }
 
 guardian_settings = {
@@ -329,7 +249,6 @@ actions_settings = {
         version = "v2"
       }
     }
-
     # SMS action disabled due to runtime version compatibility issues
     # Uncomment and configure if needed when subscription supports it
   }
