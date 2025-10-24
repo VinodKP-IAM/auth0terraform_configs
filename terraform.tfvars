@@ -1,3 +1,3 @@
 auth0_domain = "dev-itcybersecsol.us.auth0.com"
-auth0_client_id = "gycltQmas25np3y8Yqeb8BAfNnbmS1dZ"
-auth0_client_secret = "LPosB67x_-O0u2qvRYCedEES-NQRb8AIlYqcuKw_etO9VAroSw-eRgUwj4giH_DF"
+auth0_client_id = "w7unwy5vTfzkor0KGM3nwgyHDvOkgYQw"
+auth0_client_secret = "q_st9cP5m_v0xytoP5nftgu-loS_l5z9q2SNWMbEDwhoLYsQ1YWKJrAfmCMDjTlP"
