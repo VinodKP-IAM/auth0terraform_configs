@@ -296,6 +296,15 @@ jobs:
           set +e
           echo "📋 Running Terraform plan for ${{ needs.determine-strategy.outputs.deployment_type }} deployment..."
           
+          # Capture the current state lineage before planning
+          if [ -f terraform.tfstate ]; then
+            LINEAGE=$(jq -r '.lineage' terraform.tfstate)
+            echo "state_lineage=$LINEAGE" >> $GITHUB_OUTPUT
+            echo "Using state lineage: $LINEAGE"
+          else
+            echo "No existing state file found"
+          fi
+          
           # Run terraform plan and capture output
           terraform plan -var-file="${{ needs.determine-strategy.outputs.tf_vars_file }}" -out=tfplan -detailed-exitcode 2>&1 | tee plan-raw-output.txt
           PLAN_EXIT_CODE=$?
@@ -443,7 +452,6 @@ jobs:
           if [ ! -f terraform.tfstate ]; then
             # Generate a unique lineage ID
             LINEAGE=$(uuidgen || cat /proc/sys/kernel/random/uuid)
-            echo "lineage=$LINEAGE" >> $GITHUB_OUTPUT
             
             # Create initial state with the lineage
             echo '{
@@ -459,9 +467,12 @@ jobs:
           else
             # Extract existing lineage
             LINEAGE=$(jq -r '.lineage' terraform.tfstate)
-            echo "lineage=$LINEAGE" >> $GITHUB_OUTPUT
             echo "Using existing state lineage: $LINEAGE"
           fi
+          
+          # Always set the lineage output
+          echo "lineage=$LINEAGE" >> "$GITHUB_OUTPUT"
+          echo "Current lineage is: $LINEAGE"
 
       - name: Configure Auth0 Credentials
         env:
@@ -485,6 +496,11 @@ jobs:
           
       - name: Verify State Lineage
         run: |
+          if [ ! -f terraform.tfstate ]; then
+            echo "No state file found - will proceed with plan"
+            exit 0
+          fi
+          
           # Extract lineage from current state
           CURRENT_LINEAGE=$(jq -r '.lineage' terraform.tfstate)
           EXPECTED_LINEAGE="${{ needs.terraform-plan.outputs.state-lineage }}"
@@ -492,13 +508,25 @@ jobs:
           echo "Current state lineage: $CURRENT_LINEAGE"
           echo "Expected lineage from plan: $EXPECTED_LINEAGE"
           
+          # If we don't have an expected lineage, this might be first run
+          if [ -z "$EXPECTED_LINEAGE" ]; then
+            echo "No expected lineage found - this might be the first run"
+            echo "Will proceed with current state"
+            exit 0
+          fi
+          
           if [ "$CURRENT_LINEAGE" != "$EXPECTED_LINEAGE" ]; then
             echo "::error::State lineage mismatch. Plan was created with a different state."
             echo "To fix this:"
             echo "1. Clear the workflow artifacts"
             echo "2. Re-run the workflow to create a fresh state"
+            echo ""
+            echo "Current lineage: $CURRENT_LINEAGE"
+            echo "Expected lineage: $EXPECTED_LINEAGE"
             exit 1
           fi
+          
+          echo "✅ State lineage verified successfully"
 
       - name: Check State and Import Missing Resources
         env:
