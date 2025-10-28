@@ -6,7 +6,7 @@
 # To add a new setting (e.g., picture_url), you just add a new line here.
 tenant_settings = {
   manage              = true
-  friendly_name       = "My New TenantssS"
+  friendly_name       = "cdw"
   session_lifetime         = 72
   maximum_session_lifetime = 168
   support_email       = "dev-support@mycompany.com"
